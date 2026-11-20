@@ -10,15 +10,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Outside the workspace's path dependencies on this fork branch: the other craft crates come from
+# storytold at the revision SoundCraft uses, so the session types match theirs when only this crate
+# is patched.
 [dependencies]
-craft-audio = { workspace = true, features = ["lossless-encode", "peaks"] }
-craft-midi = { workspace = true, features = ["serde"] }
-craft-time.workspace = true
-craft-zip.workspace = true
+craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "45a8e16669e70dadb780dfbc759c882dd5b7ea1c", features = ["lossless-encode", "peaks"] }
+craft-midi = { git = "https://github.com/storytold/craft-libs", rev = "45a8e16669e70dadb780dfbc759c882dd5b7ea1c", features = ["serde"] }
+craft-time = { git = "https://github.com/storytold/craft-libs", rev = "45a8e16669e70dadb780dfbc759c882dd5b7ea1c" }
+craft-zip = { git = "https://github.com/storytold/craft-libs", rev = "45a8e16669e70dadb780dfbc759c882dd5b7ea1c" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-craft-audio = { workspace = true, features = ["decode", "serde"] }
+craft-audio = { git = "https://github.com/storytold/craft-libs", rev = "45a8e16669e70dadb780dfbc759c882dd5b7ea1c", features = ["decode", "serde"] }
 proptest.workspace = true
