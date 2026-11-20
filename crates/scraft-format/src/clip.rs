@@ -92,6 +92,98 @@ pub enum ClipContent {
     Video { source: SourceId, offset: Samples },
 }
 
+/// One point of a warp map: `src` samples into the unwarped material plays `dst` samples into the
+/// warped material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WarpMarker {
+    pub src: Samples,
+    pub dst: Samples,
+}
+
+/// An elastic warp of an audio clip. The clip plays a rendered file of the warped material; this
+/// keeps the unwarped material it came from and the map between the two, so the clip can be
+/// re-warped from the original, or unwarped.
+///
+/// `markers` run from `(0, 0)` to `(length, warped length)`, strictly increasing in both
+/// coordinates; between two markers the material is stretched evenly. `dst` counts from the start
+/// of the warped material, which the clip's own `offset` and `length` window, so trimming the clip
+/// leaves the map alone.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Warp {
+    /// The unwarped audio file.
+    pub source: SourceId,
+    /// Where the unwarped material starts in `source`.
+    pub offset: Samples,
+    /// Length of the unwarped material.
+    pub length: Samples,
+    pub markers: Vec<WarpMarker>,
+    /// Algorithm settings by name, as the app that warped the clip stores them.
+    #[serde(default)]
+    pub settings: std::collections::BTreeMap<String, f64>,
+}
+
+impl Warp {
+    /// A warp that stretches `length` samples of `source` from `offset` evenly to `warped`.
+    pub fn even(source: SourceId, offset: Samples, length: Samples, warped: Samples) -> Warp {
+        let length = length.clamp(1, MAX_POSITION);
+        let markers = vec![WarpMarker { src: 0, dst: 0 }, WarpMarker { src: length, dst: warped.clamp(1, MAX_POSITION) }];
+        Warp { source, offset, length, markers, settings: Default::default() }
+    }
+
+    /// Length of the warped material (the last marker's `dst`).
+    pub fn warped_length(&self) -> Samples {
+        self.markers.last().map_or(self.length, |m| m.dst)
+    }
+
+    /// Where `src` (samples into the unwarped material) lands in the warped material.
+    pub fn to_warped(&self, src: f64) -> f64 {
+        map_between(&self.markers, src, |m| m.src, |m| m.dst)
+    }
+
+    /// Which point of the unwarped material plays `dst` samples into the warped material.
+    pub fn to_unwarped(&self, dst: f64) -> f64 {
+        map_between(&self.markers, dst, |m| m.dst, |m| m.src)
+    }
+
+    /// Make the map usable: within bounds, starting at `(0, 0)`, ending at `src == length`, and
+    /// strictly increasing in both coordinates (markers that break the order are dropped).
+    pub fn sanitize(&mut self) {
+        self.length = self.length.clamp(1, MAX_POSITION);
+        bound(&mut self.offset);
+        let end = self.markers.iter().filter(|m| m.src >= self.length).map(|m| m.dst).min();
+        let mut inner: Vec<WarpMarker> = self.markers.iter().copied().filter(|m| m.src > 0 && m.src < self.length && m.dst > 0).collect();
+        inner.sort_by_key(|m| m.src);
+        let mut out = vec![WarpMarker { src: 0, dst: 0 }];
+        let mut last = out[0];
+        for m in inner {
+            if m.src > last.src && m.dst > last.dst && m.dst < MAX_POSITION {
+                out.push(m);
+                last = m;
+            }
+        }
+        let fallback = last.dst.saturating_add(self.length - last.src).min(MAX_POSITION);
+        let end = end.filter(|d| *d > last.dst && *d <= MAX_POSITION).unwrap_or(fallback).max(last.dst.saturating_add(1));
+        out.push(WarpMarker { src: self.length, dst: end });
+        self.markers = out;
+        self.settings.retain(|_, v| v.is_finite());
+    }
+}
+
+/// Piecewise-linear map through `ms` from one coordinate to the other, extended past the ends with
+/// the end segments' slopes.
+fn map_between(ms: &[WarpMarker], x: f64, from: fn(&WarpMarker) -> Samples, to: fn(&WarpMarker) -> Samples) -> f64 {
+    if ms.len() < 2 {
+        return x;
+    }
+    let i = ms.partition_point(|m| (from(m) as f64) <= x).clamp(1, ms.len() - 1);
+    let (a, b) = (&ms[i - 1], &ms[i]);
+    let (fa, fb, ta, tb) = (from(a) as f64, from(b) as f64, to(a) as f64, to(b) as f64);
+    if fb <= fa {
+        return ta;
+    }
+    ta + (x - fa) * (tb - ta) / (fb - fa)
+}
+
 /// A clip on a playlist.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Clip {
@@ -140,6 +232,9 @@ pub struct Clip {
     /// `clip.unloop` still recognises the loop after the source's content is edited.
     #[serde(default)]
     pub loop_id: Option<u64>,
+    /// The elastic warp this clip's audio was rendered from (None = not warped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<Warp>,
 }
 
 fn one() -> f64 {
@@ -168,6 +263,7 @@ impl Clip {
             stretch: 1.0,
             group: None,
             loop_id: None,
+            warp: None,
         }
     }
 
@@ -330,6 +426,9 @@ impl Clip {
         }
         if !self.stretch.is_finite() || self.stretch <= 0.0 {
             self.stretch = 1.0;
+        }
+        if let Some(w) = &mut self.warp {
+            w.sanitize();
         }
     }
 }
@@ -523,6 +622,48 @@ mod tests {
             assert!((1..=MAX_POSITION).contains(&c.length), "end {new_end}: length {}", c.length);
             assert!(c.end() - c.start == c.length, "end {new_end}: start {} end {}", c.start, c.end());
         }
+    }
+
+    #[test]
+    fn a_warp_map_stretches_each_segment_on_its_own_and_inverts() {
+        let mut w = Warp::even(SourceId(1), 0, 1000, 1000);
+        w.markers.insert(1, WarpMarker { src: 500, dst: 250 });
+        // The first half is squeezed, the second half stretched.
+        assert!(w.to_warped(250.0) < 250.0);
+        assert!(w.to_warped(750.0) - w.to_warped(500.0) > 250.0);
+        for src in [0.0, 100.0, 499.0, 500.0, 900.0, 1000.0] {
+            assert!((w.to_unwarped(w.to_warped(src)) - src).abs() < 1e-9, "{src}");
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_a_warp_map_increasing_from_start_to_end() {
+        let mut w = Warp::even(SourceId(1), -5, 1000, 2000);
+        w.markers = vec![
+            WarpMarker { src: 600, dst: 300 },
+            WarpMarker { src: 300, dst: 900 },
+            WarpMarker { src: 700, dst: 200 },
+            WarpMarker { src: 5000, dst: 2000 },
+        ];
+        w.sanitize();
+        let first = w.markers.first().copied();
+        let last = w.markers.last().copied();
+        assert_eq!(first, Some(WarpMarker { src: 0, dst: 0 }));
+        assert_eq!(last.map(|m| m.src), Some(w.length));
+        assert!(w.markers.windows(2).all(|p| p[1].src > p[0].src && p[1].dst > p[0].dst), "{:?}", w.markers);
+    }
+
+    #[test]
+    fn a_warped_clip_round_trips_and_an_unwarped_one_writes_no_warp() {
+        let mut c = Clip::audio(ClipId(1), "a", SourceId(2), 0, 0, 2000);
+        let plain = serde_json::to_string(&c).unwrap_or_default();
+        assert!(!plain.contains("warp"), "{plain}");
+        let mut w = Warp::even(SourceId(1), 10, 1000, 2000);
+        w.settings.insert("pitch".into(), 3.0);
+        c.warp = Some(w);
+        let json = serde_json::to_string(&c).unwrap_or_default();
+        let back: Option<Clip> = serde_json::from_str(&json).ok();
+        assert_eq!(back, Some(c));
     }
 
     #[test]
