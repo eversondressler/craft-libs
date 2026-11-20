@@ -493,7 +493,7 @@ impl Session {
     }
 
     pub fn clips_using(&self, src: SourceId) -> impl Iterator<Item = &Clip> {
-        self.all_clips().filter(move |c| c.source() == Some(src))
+        self.all_clips().filter(move |c| c.source() == Some(src) || c.warp.as_ref().is_some_and(|w| w.source == src))
     }
 
     /// End of the last clip on any track (session length).
