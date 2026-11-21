@@ -306,6 +306,11 @@ pub struct Track {
     /// Elastic Audio algorithm, if enabled.
     #[serde(default)]
     pub elastic: Option<String>,
+    /// Elastic Audio processing in real time: the playback engine stretches the clips' original
+    /// audio through their warp maps as it plays, instead of playing files rendered from them.
+    /// Sessions without it render (as they did before it existed).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub elastic_realtime: bool,
     /// Pinned to top in the Edit window.
     #[serde(default)]
     pub pinned: bool,
@@ -347,6 +352,7 @@ impl Track {
             instrument: None,
             ticks_timebase: kind.is_midi(),
             elastic: None,
+            elastic_realtime: false,
             pinned: false,
         }
     }
