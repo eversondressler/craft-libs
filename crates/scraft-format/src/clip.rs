@@ -169,6 +169,43 @@ impl Warp {
     }
 }
 
+/// The Elastic Audio event markers of one audio file (see `Session::elastic_events`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FileEvents {
+    /// Detection sensitivity, 0–1 (higher finds more, quieter transients).
+    #[serde(default = "FileEvents::default_sensitivity")]
+    pub sensitivity: f32,
+    /// The markers (sample positions in the file), once added, moved or removed by hand; `None`
+    /// uses what the detection finds at `sensitivity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<Vec<Samples>>,
+}
+
+impl FileEvents {
+    pub const DEFAULT_SENSITIVITY: f32 = 0.5;
+
+    fn default_sensitivity() -> f32 {
+        Self::DEFAULT_SENSITIVITY
+    }
+
+    /// Make the entry usable: a finite sensitivity within 0–1, and edited markers sorted, unique
+    /// and within ±[`MAX_POSITION`].
+    pub fn sanitize(&mut self) {
+        self.sensitivity = if self.sensitivity.is_finite() { self.sensitivity.clamp(0.0, 1.0) } else { Self::DEFAULT_SENSITIVITY };
+        if let Some(ev) = &mut self.edited {
+            ev.iter_mut().for_each(bound);
+            ev.sort_unstable();
+            ev.dedup();
+        }
+    }
+}
+
+impl Default for FileEvents {
+    fn default() -> Self {
+        Self { sensitivity: Self::DEFAULT_SENSITIVITY, edited: None }
+    }
+}
+
 /// Piecewise-linear map through `ms` from one coordinate to the other, extended past the ends with
 /// the end segments' slopes.
 fn map_between(ms: &[WarpMarker], x: f64, from: fn(&WarpMarker) -> Samples, to: fn(&WarpMarker) -> Samples) -> f64 {
@@ -651,6 +688,16 @@ mod tests {
         assert_eq!(first, Some(WarpMarker { src: 0, dst: 0 }));
         assert_eq!(last.map(|m| m.src), Some(w.length));
         assert!(w.markers.windows(2).all(|p| p[1].src > p[0].src && p[1].dst > p[0].dst), "{:?}", w.markers);
+    }
+
+    #[test]
+    fn file_events_sanitize_and_default_when_left_out() {
+        let mut ev = FileEvents { sensitivity: f32::NAN, edited: Some(vec![300, 100, 300, -MAX_POSITION * 2]) };
+        ev.sanitize();
+        assert_eq!(ev.sensitivity, FileEvents::DEFAULT_SENSITIVITY);
+        assert_eq!(ev.edited, Some(vec![-MAX_POSITION, 100, 300]));
+        let read: Option<FileEvents> = serde_json::from_str("{}").ok();
+        assert_eq!(read, Some(FileEvents::default()));
     }
 
     #[test]
