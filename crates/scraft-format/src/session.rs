@@ -378,6 +378,10 @@ pub struct Session {
     /// Performance). Independent of undo so a restore survives later edits.
     #[serde(default)]
     pub midi_originals: std::collections::BTreeMap<u64, crate::soundcraft_midi::Sequence>,
+    /// Elastic Audio event markers of audio files, keyed by file id: the detection sensitivity
+    /// and, once edited by hand, the markers themselves. Files left out use the defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub elastic_events: std::collections::BTreeMap<u64, crate::FileEvents>,
     #[serde(skip)]
     pub pool: SourcePool,
     /// The folder relative source paths point into: where the session was opened or last saved.
@@ -427,6 +431,7 @@ impl Session {
             next_id: 1,
             comments: String::new(),
             midi_originals: std::collections::BTreeMap::new(),
+            elastic_events: std::collections::BTreeMap::new(),
             pool: SourcePool::default(),
             folder: None,
         };
@@ -805,6 +810,7 @@ impl Session {
         self.next_id = self.next_id.max(max_id.saturating_add(1));
         truncate_chars(&mut self.name, MAX_NAME_CHARS);
         truncate_chars(&mut self.comments, MAX_COMMENT_CHARS);
+        self.elastic_events.values_mut().for_each(crate::FileEvents::sanitize);
         for t in &mut self.tracks {
             t.mixer.sanitize();
             truncate_chars(&mut t.name, MAX_NAME_CHARS);
