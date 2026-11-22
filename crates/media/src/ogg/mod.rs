@@ -877,5 +877,8 @@ impl VorbisInfo {
     }
 }
 
+mod write;
+pub use write::{Writer, opus_tags};
+
 #[cfg(test)]
 mod tests;
