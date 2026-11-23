@@ -97,21 +97,42 @@ impl VideoSource {
     }
 }
 
-/// Decoded audio plus waveform overviews (not serialised).
+/// Audio read from somewhere other than memory (a file paged from disk): the app that makes one
+/// decides how it is held and when it is loaded.
+pub trait PagedAudio: Send + Sync + std::fmt::Debug {
+    /// Samples per channel.
+    fn frames(&self) -> usize;
+    /// How many channels it has.
+    fn channel_count(&self) -> usize;
+    /// `out.len()` samples of channel `ch` from frame `from`; past its end, or for a channel it
+    /// does not have, zeros.
+    fn read(&self, ch: usize, from: usize, out: &mut [f32]);
+    /// The value itself, for the app that made it.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Decoded audio plus waveform overviews (not serialised). A paged source holds no samples in
+/// `buffer` (only its rate) nor `peaks`: its audio is read through `paged`.
 #[derive(Debug)]
 pub struct SourceAudio {
     pub buffer: AudioBuffer,
     pub peaks: Vec<Peaks>,
+    pub paged: Option<Arc<dyn PagedAudio>>,
 }
 
 impl SourceAudio {
     pub fn new(buffer: AudioBuffer) -> Self {
         let peaks = buffer.channels.iter().map(|c| Peaks::build(c)).collect();
-        SourceAudio { buffer, peaks }
+        SourceAudio { buffer, peaks, paged: None }
+    }
+    /// A source at `sample_rate` whose audio is read through `paged` rather than held.
+    pub fn paged(sample_rate: u32, paged: Arc<dyn PagedAudio>) -> Self {
+        SourceAudio { buffer: AudioBuffer { sample_rate, channels: Vec::new() }, peaks: Vec::new(), paged: Some(paged) }
     }
     pub fn frames(&self) -> usize {
-        self.buffer.frames()
+        self.paged.as_ref().map_or_else(|| self.buffer.frames(), |p| p.frames())
     }
+    /// One channel's samples, when they are held in memory (`None` for a paged source).
     pub fn channel(&self, ch: usize) -> Option<&[f32]> {
         self.buffer.channels.get(ch).map(Vec::as_slice)
     }
